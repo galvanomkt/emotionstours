@@ -1,0 +1,196 @@
+import { Hono } from "npm:hono";
+import { cors } from "npm:hono/cors";
+import { logger } from "npm:hono/logger";
+import { createClient } from "jsr:@supabase/supabase-js@2";
+import * as kv from "./kv_store.tsx";
+
+const app = new Hono();
+
+// Enable logger
+app.use('*', logger(console.log));
+
+// Enable CORS for all routes and methods
+app.use(
+  "/*",
+  cors({
+    origin: "*",
+    allowHeaders: ["Content-Type", "Authorization", "x-client-info", "apikey"],
+    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    exposeHeaders: ["Content-Length"],
+    maxAge: 600,
+  }),
+);
+
+// Initialize Supabase Client
+const supabaseUrl = Deno.env.get("SUPABASE_URL") || "";
+const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+const BUCKET_NAME = "make-2afecbd0-content";
+
+// Ensure bucket exists on startup
+(async () => {
+  try {
+    const { data: buckets } = await supabase.storage.listBuckets();
+    const bucketExists = buckets?.some(bucket => bucket.name === BUCKET_NAME);
+    if (!bucketExists) {
+      console.log("Creating bucket:", BUCKET_NAME);
+      await supabase.storage.createBucket(BUCKET_NAME, {
+        public: true, // Making it public for easier access for a travel site images
+        fileSizeLimit: 5242880, // 5MB
+        allowedMimeTypes: ['image/png', 'image/jpeg', 'image/jpg', 'image/webp']
+      });
+    }
+  } catch (error) {
+    console.error("Error initializing bucket:", error);
+  }
+})();
+
+// Health check endpoint
+app.get("/make-server-2afecbd0/health", (c) => {
+  return c.json({ status: "ok" });
+});
+
+// --- DESTINATIONS API ---
+
+// GET /destinations - Fetch all destinations
+app.get("/make-server-2afecbd0/destinations", async (c) => {
+  try {
+    const storedData = await kv.get("destinations");
+    if (storedData) return c.json(storedData);
+    return c.json([]);
+  } catch (error) {
+    console.error("Error fetching destinations:", error);
+    return c.json({ error: "Failed to fetch destinations" }, 500);
+  }
+});
+
+// POST /destinations - Save all destinations
+app.post("/make-server-2afecbd0/destinations", async (c) => {
+  try {
+    const data = await c.req.json();
+    await kv.set("destinations", data);
+    return c.json({ success: true });
+  } catch (error) {
+    console.error("Error saving destinations:", error);
+    return c.json({ error: "Failed to save destinations" }, 500);
+  }
+});
+
+// --- HERO API ---
+
+// GET /hero - Fetch hero slides
+app.get("/make-server-2afecbd0/hero", async (c) => {
+  try {
+    const storedData = await kv.get("hero");
+    if (storedData) return c.json(storedData);
+    return c.json([]); 
+  } catch (error) {
+    console.error("Error fetching hero:", error);
+    return c.json({ error: "Failed to fetch hero" }, 500);
+  }
+});
+
+// POST /hero - Save hero slides
+app.post("/make-server-2afecbd0/hero", async (c) => {
+  try {
+    const data = await c.req.json();
+    await kv.set("hero", data);
+    return c.json({ success: true });
+  } catch (error) {
+    console.error("Error saving hero:", error);
+    return c.json({ error: "Failed to save hero" }, 500);
+  }
+});
+
+// --- REVIEWS API ---
+
+// GET /reviews - Fetch all reviews
+app.get("/make-server-2afecbd0/reviews", async (c) => {
+  try {
+    const storedData = await kv.get("reviews");
+    // If no reviews stored, return empty array (frontend will handle defaults)
+    if (storedData) return c.json(storedData);
+    return c.json([]);
+  } catch (error) {
+    console.error("Error fetching reviews:", error);
+    return c.json({ error: "Failed to fetch reviews" }, 500);
+  }
+});
+
+// POST /reviews - Save all reviews
+app.post("/make-server-2afecbd0/reviews", async (c) => {
+  try {
+    const data = await c.req.json();
+    await kv.set("reviews", data);
+    return c.json({ success: true });
+  } catch (error) {
+    console.error("Error saving reviews:", error);
+    return c.json({ error: "Failed to save reviews" }, 500);
+  }
+});
+
+// --- SETTINGS API ---
+
+// GET /settings - Fetch global settings
+app.get("/make-server-2afecbd0/settings", async (c) => {
+  try {
+    const storedData = await kv.get("settings");
+    return c.json(storedData || {});
+  } catch (error) {
+    console.error("Error fetching settings:", error);
+    return c.json({ error: "Failed to fetch settings" }, 500);
+  }
+});
+
+// POST /settings - Save global settings
+app.post("/make-server-2afecbd0/settings", async (c) => {
+  try {
+    const data = await c.req.json();
+    await kv.set("settings", data);
+    return c.json({ success: true });
+  } catch (error) {
+    console.error("Error saving settings:", error);
+    return c.json({ error: "Failed to save settings" }, 500);
+  }
+});
+
+// POST /upload - Upload an image
+app.post("/make-server-2afecbd0/upload", async (c) => {
+  try {
+    const formData = await c.req.formData();
+    const file = formData.get('file');
+    
+    if (!file || !(file instanceof File)) {
+      return c.json({ error: "No file uploaded" }, 400);
+    }
+
+    const fileExt = file.name.split('.').pop();
+    const fileName = `${crypto.randomUUID()}.${fileExt}`;
+    const filePath = `destinations/${fileName}`;
+
+    const { data, error } = await supabase.storage
+      .from(BUCKET_NAME)
+      .upload(filePath, file, {
+        contentType: file.type,
+        upsert: false
+      });
+
+    if (error) {
+      throw error;
+    }
+
+    // Get public URL
+    const { data: { publicUrl } } = supabase.storage
+      .from(BUCKET_NAME)
+      .getPublicUrl(filePath);
+
+    return c.json({ url: publicUrl });
+
+  } catch (error) {
+    console.error("Error uploading file:", error);
+    return c.json({ error: "Failed to upload file: " + error.message }, 500);
+  }
+});
+
+Deno.serve(app.fetch);
